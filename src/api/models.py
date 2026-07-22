@@ -39,6 +39,8 @@ class Lector(db.Model):
     is_active: Mapped[bool] = mapped_column(
         Boolean(), nullable=False, default=True)
     foto_url: Mapped[str] = mapped_column(String(500), nullable=True)
+    biografia: Mapped[str] = mapped_column(db.Text, nullable=True)
+    generos_favoritos: Mapped[str] = mapped_column(String(255), nullable=True)
 
     latitud: Mapped[float] = mapped_column(db.Float, nullable=True)
     longitud: Mapped[float] = mapped_column(db.Float, nullable=True)
@@ -56,8 +58,10 @@ class Lector(db.Model):
         "Seguidor", foreign_keys="Seguidor.seguido_id", back_populates="lector_seguido", cascade="all, delete-orphan")
 
     reviews: Mapped[List["Reviews"]] = relationship(back_populates="lector")
-
-    posts_lector: Mapped[List["PostLector"]] = relationship(back_populates="lector")
+    posts_lector: Mapped[List["PostLector"]] = relationship(back_populates="lector", cascade="all, delete-orphan")
+    comentarios: Mapped[List["Comentario"]] = relationship(back_populates="lector", cascade="all, delete-orphan")
+    notificaciones: Mapped[List["Notificacion"]] = relationship(back_populates="lector", cascade="all, delete-orphan")
+    favorites_editorial: Mapped[List["Lector_Editoriales_Favoritas"]] = relationship(back_populates="lector", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f'<Lector: {self.username}>'
@@ -84,9 +88,12 @@ class Lector(db.Model):
 
             "foto_url": foto_final,
 
+            "biografia": self.biografia,
+            "generos_favoritos": self.generos_favoritos,
             "siguiendo": [s.serialize_as_siguiendo() for s in self.siguiendo],
-            "seguidores": [f.serialize_as_seguidor() for f in self.seguidores]
-            # do not serialize the password, its a security breach
+            "seguidores": [f.serialize_as_seguidor() for f in self.seguidores],
+            "total_siguiendo": len(self.siguiendo),
+            "total_seguidores": len(self.seguidores)
         }
 
 
@@ -101,6 +108,8 @@ class Editorial(db.Model):
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False)
     image_url: Mapped[str] = mapped_column(String(255), nullable=True)
     verification_status = db.Column(db.String(50), default="pending")
+    descripcion: Mapped[str] = mapped_column(db.Text, nullable=True)
+    sitio_web: Mapped[str] = mapped_column(String(255), nullable=True)
     libros: Mapped[List["Libro"]] = relationship(
         back_populates="editorial",
         cascade="all, delete-orphan"
@@ -108,6 +117,9 @@ class Editorial(db.Model):
     posts: Mapped[List["PostEditorial"]] = relationship(
         back_populates="editorial",
         cascade="all, delete-orphan"
+    )
+    lector_editoriales_favoritas: Mapped[List["Lector_Editoriales_Favoritas"]] = relationship(
+        back_populates="editorial", cascade="all, delete-orphan"
     )
 
     def __repr__(self):
@@ -122,7 +134,9 @@ class Editorial(db.Model):
             "image_url": self.image_url,
             "is_verified": self.is_verified,
             "verification_status": self.verification_status,
-            "libros": [l.serialize() for l in self.libros] 
+            "descripcion": self.descripcion,
+            "sitio_web": self.sitio_web,
+            "libros": [l.serialize() for l in self.libros]
         }
 
 
@@ -138,6 +152,8 @@ class Autor(db.Model):
     is_verified = db.Column(db.Boolean(), default=False)
     foto_url = db.Column(db.String(500), nullable=True)
     verification_status = db.Column(db.String(50), default="pending")
+    biografia = db.Column(db.Text, nullable=True)
+    generos = db.Column(db.String(255), nullable=True)
     favorited: Mapped[List["Lector_Autores_Favoritos"]
                       ] = relationship(back_populates="autor")
     libros: Mapped[List["Libro"]] = relationship(
@@ -165,6 +181,8 @@ class Autor(db.Model):
             "foto": foto_final,
             "is_verified": self.is_verified,
             "verification_status": self.verification_status,
+            "biografia": self.biografia,
+            "generos": self.generos,
             "libros": [libro.serialize() for libro in self.libros] if self.libros else []
         }
 
@@ -382,7 +400,8 @@ class PostEditorial(db.Model):
             "nombre_editorial": f"{self.editorial.nombre}" if self.editorial else None,
             "foto_editorial": self.editorial.image_url,
             "texto": self.texto,
-            "fecha": self.fecha.strftime("%d-%m-%Y %H:%M") if self.fecha else None
+            "fecha": self.fecha.strftime("%d-%m-%Y %H:%M") if self.fecha else None,
+            "total_comentarios": len(self.comentarios)
         }
 
 
@@ -406,7 +425,8 @@ class PostAutor(db.Model):
             "nombre_autor": f"{self.autor.nombre} {self.autor.apellido}" if self.autor else None,
             "foto_autor": self.autor.foto_url if self.autor else None,
             "texto": self.texto,
-            "fecha": self.fecha.strftime("%d-%m-%Y %H:%M")
+            "fecha": self.fecha.strftime("%d-%m-%Y %H:%M"),
+            "total_comentarios": len(self.comentarios)
         }
 
 
@@ -474,7 +494,7 @@ class PostLector(db.Model):
     id: Mapped[int] = mapped_column(primary_key=True)
     
     lector_id: Mapped[int] = mapped_column(ForeignKey("lector.id"))
-    lector: Mapped["Lector"] = relationship(back_populates="posts_lector") # Cambié backref por back_populates para ser explícitos
+    lector: Mapped["Lector"] = relationship(back_populates="posts_lector")
 
     texto: Mapped[str] = mapped_column(db.Text, nullable=False)
     imagen_url: Mapped[str] = mapped_column(String(500), nullable=True) 
@@ -490,11 +510,16 @@ class PostLector(db.Model):
     )
 
     def serialize(self):
+        foto_final = self.lector.foto_url if self.lector else None
+        if foto_final and not foto_final.startswith("http"):
+            base_url = os.getenv("VITE_BACKEND_URL", "").rstrip("/")
+            foto_final = f"{base_url}/{foto_final.lstrip('/')}"
         return {
             "id": self.id,
             "lector_id": self.lector_id,
             "username_lector": self.lector.username if self.lector else "Usuario",
-            "foto_lector": self.lector.foto_url if self.lector else None,
+            "nombre_lector": f"{self.lector.nombre} {self.lector.apellido}" if self.lector else None,
+            "foto_lector": foto_final,
             "texto": self.texto,
             "imagen_url": self.imagen_url,
             "fecha": self.fecha.strftime("%d-%m-%Y %H:%M"),
@@ -511,14 +536,11 @@ class Comentario(db.Model):
     fecha: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc))
 
     # Auto-referencia para Hilos de Conversación
-
     parent_id: Mapped[int] = mapped_column(ForeignKey("comentario.id"), nullable=True)
     
     # Relación para obtener las respuestas directas de este comentario
-    
     respuestas = relationship("Comentario", back_populates="padre", cascade="all, delete-orphan")
     padre = relationship("Comentario", back_populates="respuestas", remote_side=[id])
-
 
     # --- ¿QUIÉN ESCRIBE? (Uno de estos será el autor) ---
     lector_id: Mapped[int] = mapped_column(ForeignKey("lector.id"), nullable=True)
@@ -560,14 +582,62 @@ class Comentario(db.Model):
             foto_del_creador = self.autor.foto_url
             tipo_de_cuenta = "autor"
 
+        if foto_del_creador and not foto_del_creador.startswith("http"):
+            base_url = os.getenv("VITE_BACKEND_URL", "").rstrip("/")
+            foto_del_creador = f"{base_url}/{foto_del_creador.lstrip('/')}"
+
         return {
             "id": self.id,
             "texto": self.texto,
             "fecha": self.fecha.strftime("%d-%m-%Y %H:%M"),
             "creador_nombre": nombre_del_creador,
             "creador_foto": foto_del_creador,
-            "creador_tipo": tipo_de_cuenta, # Esto te servirá en el front para poner colores
+            "creador_tipo": tipo_de_cuenta,
             "post_id": self.post_editorial_id or self.post_autor_id or self.post_lector_id,
             "parent_id": self.parent_id,
             "respuestas": [resp.serialize() for resp in self.respuestas] if self.respuestas else []
+        }
+
+
+class Notificacion(db.Model):
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    lector_id: Mapped[int] = mapped_column(ForeignKey("lector.id"))
+    lector: Mapped["Lector"] = relationship(back_populates="notificaciones")
+
+    tipo: Mapped[str] = mapped_column(String(50), nullable=False)
+    mensaje: Mapped[str] = mapped_column(String(500), nullable=False)
+    leida: Mapped[bool] = mapped_column(Boolean, default=False)
+    fecha: Mapped[datetime] = mapped_column(
+        default=lambda: datetime.now(timezone.utc))
+    url_destino: Mapped[str] = mapped_column(String(255), nullable=True)
+
+    def serialize(self):
+        return {
+            "id": self.id,
+            "lector_id": self.lector_id,
+            "tipo": self.tipo,
+            "mensaje": self.mensaje,
+            "leida": self.leida,
+            "fecha": self.fecha.strftime("%d-%m-%Y %H:%M") if self.fecha else None,
+            "url_destino": self.url_destino
+        }
+
+
+class Lector_Editoriales_Favoritas(db.Model):
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    lector_id: Mapped[int] = mapped_column(ForeignKey("lector.id"), nullable=False)
+    editorial_id: Mapped[int] = mapped_column(ForeignKey("editorial.id"), nullable=False)
+
+    lector: Mapped["Lector"] = relationship(back_populates="favorites_editorial")
+    editorial: Mapped["Editorial"] = relationship(back_populates="lector_editoriales_favoritas")
+
+    def serialize(self):
+        return {
+            "id": self.id,
+            "lector_id": self.lector_id,
+            "editorial_id": self.editorial_id,
+            "nombre_editorial": self.editorial.nombre if self.editorial else None,
+            "imagen_editorial": self.editorial.image_url if self.editorial else None
         }

@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from "react";
 import useGlobalReducer from "../hooks/useGlobalReducer";
 import { Link } from "react-router-dom";
+import ComentariosPost from "../components/ComentariosPost";
 
 const PostSinLogin = () => {
     const { store } = useGlobalReducer();
@@ -112,6 +113,9 @@ const PostSinLogin = () => {
                                             tipoPost="autor"
                                             tipoUsuarioActual={tipoUsuarioLogueado}
                                         />
+
+                                        {/* Comentarios */}
+                                        <ComentariosPost tipo="autor" postId={post.id} />
 
                                     </div>
                                 </div>

@@ -2,7 +2,7 @@
 This module takes care of starting the API Server, Loading the DB and Adding the endpoints
 """
 from flask import Flask, request, jsonify, url_for, Blueprint
-from api.models import db, User, Lector, Editorial, Autor, Libro, LibrosFavoritos, Lector_Autores_Favoritos, Seguidor, Reviews, Admin, PostEditorial, LecturaActual, PostAutor, Mensaje, DmLector, Comentario, PostLector
+from api.models import db, User, Lector, Editorial, Autor, Libro, LibrosFavoritos, Lector_Autores_Favoritos, Seguidor, Reviews, Admin, PostEditorial, LecturaActual, PostAutor, Mensaje, DmLector, PostLector, Comentario, Notificacion, Lector_Editoriales_Favoritas
 from api.utils import generate_sitemap, APIException
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -155,6 +155,8 @@ def update_lector(lector_id):
 
     lector.latitud = body.get("latitud", lector.latitud)
     lector.longitud = body.get("longitud", lector.longitud)
+    lector.biografia = body.get("biografia", lector.biografia)
+    lector.generos_favoritos = body.get("generos_favoritos", lector.generos_favoritos)
 
     db.session.commit()
 
@@ -227,7 +229,9 @@ def update_autor(autor_id):
     autor.password = body.get("password", autor.password)
     autor.nombre = body.get("nombre", autor.nombre)
     autor.apellido = body.get("apellido", autor.apellido)
-    autor.pais = body.get("pais donde reside", autor.pais)
+    autor.pais = body.get("pais", autor.pais)
+    autor.biografia = body.get("biografia", autor.biografia)
+    autor.generos = body.get("generos", autor.generos)
 
     db.session.commit()
 
@@ -300,9 +304,10 @@ def update_editorial(editorial_id):
     editorial.email = body.get("email", editorial.email)
     editorial.password = body.get("password", editorial.password)
     editorial.nombre = body.get("nombre", editorial.nombre)
-    editorial.pais = body.get("pais donde reside", editorial.pais)
-
+    editorial.pais = body.get("pais", editorial.pais)
     editorial.image_url = body.get("image_url", editorial.image_url)
+    editorial.descripcion = body.get("descripcion", editorial.descripcion)
+    editorial.sitio_web = body.get("sitio_web", editorial.sitio_web)
 
     db.session.commit()
 
@@ -1920,53 +1925,76 @@ def obtener_contactos():
     contactos = Lector.query.filter(Lector.id.in_(list(ids_contactos))).all()
     return jsonify([c.serialize() for c in contactos]), 200
 
-@api.route('/comentario', methods=['POST'])
-@jwt_required()
-def post_comentario():
+
+# =======================================================
+# --- POSTS DE LECTORES ---
+# =======================================================
+
+@api.route('/postlector', methods=['GET'])
+def get_all_posts_lector():
+    try:
+        posts = PostLector.query.order_by(PostLector.fecha.desc()).all()
+        return jsonify([p.serialize() for p in posts]), 200
+    except Exception as e:
+        print("🔴 ERROR EN GET_ALL_POSTS_LECTOR:", str(e))
+        return jsonify({"msg": "Error al obtener posts", "error": str(e)}), 500
+
+
+@api.route('/postlector/lector/<int:lector_id>', methods=['GET'])
+def get_posts_lector(lector_id):
+    try:
+        posts = PostLector.query.filter_by(lector_id=lector_id).order_by(PostLector.fecha.desc()).all()
+        return jsonify([p.serialize() for p in posts]), 200
+    except Exception as e:
+        print("🔴 ERROR EN GET_POSTS_LECTOR:", str(e))
+        return jsonify({"msg": "Error al obtener posts", "error": str(e)}), 500
+
+
+@api.route('/postlector', methods=['POST'])
+@jwt_required(optional=True)
+def create_post_lector():
     body = request.get_json()
-    
-    # Extraemos el diccionario que guardamos en el login
-    identidad = get_jwt_identity() 
-    user_id = identidad["id"]
-    tipo_usuario = identidad["tipo"]
-    
-    texto = body.get("texto")
-    nuevo_comentario = Comentario(texto=texto)
+    if not body or "texto" not in body:
+        return jsonify({"msg": "Faltan datos: texto es obligatorio"}), 400
 
-    # 1. Asignamos quién escribe basándonos en el TIPO del token
-    if tipo_usuario == 'lector':
-        nuevo_comentario.lector_id = user_id
-    elif tipo_usuario == 'editorial':
-        nuevo_comentario.editorial_id = user_id
-    elif tipo_usuario == 'autor':
-        nuevo_comentario.autor_id = user_id
+    lector_id = body.get("lector_id")
+    identity = get_jwt_identity()
+    if identity:
+        if isinstance(identity, str):
+            identity = json.loads(identity)
+        lector_id = identity.get("id")
 
-    # 2. Asignamos a qué post va (esto viene del frontend)
-    if "post_editorial_id" in body:
-        nuevo_comentario.post_editorial_id = body["post_editorial_id"]
-    elif "post_autor_id" in body:
-        nuevo_comentario.post_autor_id = body["post_autor_id"]
-    elif "post_lector_id" in body:
-        nuevo_comentario.post_lector_id = body["post_lector_id"]
+    if not lector_id:
+        return jsonify({"msg": "Lector ID no proporcionado ni deducido de la sesión"}), 400
 
-    db.session.add(nuevo_comentario)
+    nuevo = PostLector(lector_id=lector_id, texto=body["texto"], imagen_url=body.get("imagen_url"))
+    db.session.add(nuevo)
     db.session.commit()
-    
-    return jsonify({"msg": "¡Comentario publicado!", "comentario": nuevo_comentario.serialize()}), 201
+
+    # Notificar a los seguidores del lector
+    lector = Lector.query.get(lector_id)
+    if lector:
+        for seg in lector.seguidores:
+            notif = Notificacion(
+                lector_id=seg.lector_id,
+                tipo="nuevo_post_lector",
+                mensaje=f"{lector.username} publicó algo nuevo.",
+                url_destino=f"/perfil_lector/{lector.id}"
+            )
+            db.session.add(notif)
+        db.session.commit()
+
+    return jsonify(nuevo.serialize()), 201
+
 
 @api.route('/post-lector', methods=['POST'])
 @jwt_required()
 def crear_post_lector():
     try:
         body = request.get_json()
-        
-        # 1. Recuperamos el string JSON que configuramos en el login
-        identity_raw = get_jwt_identity() 
-        
-        # 2. Lo transformamos de texto a un diccionario de Python de verdad
-        identity = json.loads(identity_raw) 
-        
-        # 3. Ahora sí podemos usar .get() de forma segura
+        identity = get_jwt_identity() 
+        if isinstance(identity, str):
+            identity = json.loads(identity)
         lector_id = identity.get("id") 
         
         if not body or not body.get("texto"):
@@ -1980,89 +2008,122 @@ def crear_post_lector():
         
         db.session.add(nuevo_post)
         db.session.commit()
+
+        # Notificar a los seguidores
+        lector = Lector.query.get(lector_id)
+        if lector:
+            for seg in lector.seguidores:
+                notif = Notificacion(
+                    lector_id=seg.lector_id,
+                    tipo="nuevo_post_lector",
+                    mensaje=f"{lector.username} publicó algo nuevo.",
+                    url_destino=f"/perfil_lector/{lector.id}"
+                )
+                db.session.add(notif)
+            db.session.commit()
         
         return jsonify({"msg": "Post creado!", "post": nuevo_post.serialize()}), 201
 
     except Exception as e:
-        # Si algo falla, esto evitará el misterioso error 500 sin explicación
-        # e imprimirá el error real en tu terminal de Flask
         print("🔴 ERROR INTERNO EN CREAR_POST_LECTOR:", str(e))
         return jsonify({"msg": "Error interno del servidor", "error": str(e)}), 500
-    
-@api.route('/postlector/lector/<int:lector_id>', methods=['GET'])
-def obtener_posts_lector(lector_id):
-    try:
-        # Buscamos todos los posts de ese lector ordenados del más nuevo al más viejo
-        posts = PostLector.query.filter_by(lector_id=lector_id).order_by(PostLector.id.desc()).all()
-        
-        # Serializamos la lista
-        posts_serializados = [p.serialize() for p in posts]
-        return jsonify(posts_serializados), 200
-        
-    except Exception as e:
-        print("🔴 ERROR EN OBTENER_POSTS_LECTOR:", str(e))
-        return jsonify({"msg": "Error al obtener los posts", "error": str(e)}), 500
-    
+
+
 @api.route('/postlector/<int:post_id>', methods=['PUT'])
-@jwt_required()
+@jwt_required(optional=True)
 def actualizar_post_lector(post_id):
     try:
         body = request.get_json()
         nuevo_texto = body.get("texto")
-        
         if not nuevo_texto:
             return jsonify({"msg": "El texto modificado es requerido"}), 400
             
-        # Validamos quién es el dueño del token por seguridad
-        identity_raw = get_jwt_identity()
-        identity = json.loads(identity_raw)
-        lector_id_token = identity.get("id")
-        
-        # Buscamos el post en la base de datos
         post = PostLector.query.get(post_id)
         if not post:
             return jsonify({"msg": "Post no encontrado"}), 404
             
-        # Control de seguridad: que el lector del token sea el dueño real del post
-        if post.lector_id != lector_id_token:
-            return jsonify({"msg": "No tienes permisos para editar este post"}), 403
+        identity = get_jwt_identity()
+        if identity:
+            if isinstance(identity, str):
+                identity = json.loads(identity)
+            if post.lector_id != identity.get("id"):
+                return jsonify({"msg": "No tienes permisos para editar este post"}), 403
             
-        # Actualizamos el campo
         post.texto = nuevo_texto
         db.session.commit()
-        
         return jsonify({"msg": "Post actualizado con éxito", "post": post.serialize()}), 200
         
     except Exception as e:
         print("🔴 ERROR EN ACTUALIZAR_POST_LECTOR:", str(e))
         return jsonify({"msg": "Error al editar el post", "error": str(e)}), 500
-    
+
+
 @api.route('/postlector/<int:post_id>', methods=['DELETE'])
-@jwt_required()
+@jwt_required(optional=True)
 def eliminar_post_lector(post_id):
     try:
-        # Validamos quién es el dueño del token por seguridad
-        identity_raw = get_jwt_identity()
-        identity = json.loads(identity_raw)
-        lector_id_token = identity.get("id")
-        
         post = PostLector.query.get(post_id)
         if not post:
             return jsonify({"msg": "Post no encontrado"}), 404
             
-        # Control de seguridad estricto
-        if post.lector_id != lector_id_token:
-            return jsonify({"msg": "No tienes permisos para eliminar este post"}), 403
+        identity = get_jwt_identity()
+        if identity:
+            if isinstance(identity, str):
+                identity = json.loads(identity)
+            if post.lector_id != identity.get("id"):
+                return jsonify({"msg": "No tienes permisos para eliminar este post"}), 403
             
         db.session.delete(post)
         db.session.commit()
-        
         return jsonify({"msg": "Post eliminado permanentemente"}), 200
         
     except Exception as e:
         print("🔴 ERROR EN ELIMINAR_POST_LECTOR:", str(e))
         return jsonify({"msg": "Error al eliminar el post", "error": str(e)}), 500
-    
+
+
+# =======================================================
+# --- COMENTARIOS EN POSTS (NUEVO FLUJO CON HILOS) ---
+# =======================================================
+
+@api.route('/comentario', methods=['POST'])
+@jwt_required()
+def post_comentario():
+    try:
+        body = request.get_json()
+        identity = get_jwt_identity() 
+        if isinstance(identity, str):
+            identity = json.loads(identity)
+            
+        user_id = identity["id"]
+        tipo_usuario = identity["tipo"]
+        
+        texto = body.get("texto")
+        nuevo_comentario = Comentario(texto=texto, parent_id=body.get("parent_id"))
+
+        if tipo_usuario == 'lector':
+            nuevo_comentario.lector_id = user_id
+        elif tipo_usuario == 'editorial':
+            nuevo_comentario.editorial_id = user_id
+        elif tipo_usuario == 'autor':
+            nuevo_comentario.autor_id = user_id
+
+        if "post_editorial_id" in body:
+            nuevo_comentario.post_editorial_id = body["post_editorial_id"]
+        elif "post_autor_id" in body:
+            nuevo_comentario.post_autor_id = body["post_autor_id"]
+        elif "post_lector_id" in body:
+            nuevo_comentario.post_lector_id = body["post_lector_id"]
+
+        db.session.add(nuevo_comentario)
+        db.session.commit()
+        
+        return jsonify({"msg": "¡Comentario publicado!", "comentario": nuevo_comentario.serialize()}), 201
+    except Exception as e:
+        print("🔴 ERROR EN POST_COMENTARIO:", str(e))
+        return jsonify({"msg": "Error al publicar comentario", "error": str(e)}), 500
+
+
 @api.route('/comentarios', methods=['POST'])
 @jwt_required()
 def crear_comentario():
@@ -2070,28 +2131,24 @@ def crear_comentario():
         body = request.get_json()
         texto = body.get("texto")
         post_id = body.get("post_id")
-        tipo_post = body.get("tipo_post") # Puede ser: 'lector', 'autor' o 'editorial'
-        
-        # 🌟 NUEVO: Extraemos el parent_id (si viene, será el ID del comentario padre; si no, será None)
+        tipo_post = body.get("tipo_post") 
         parent_id = body.get("parent_id") 
 
         if not texto or not post_id or not tipo_post:
             return jsonify({"msg": "Faltan datos obligatorios: texto, post_id y tipo_post"}), 400
 
-        # 1. Identificamos quién está comentando gracias al Token
-        identity_raw = get_jwt_identity()
-        identity = json.loads(identity_raw)
+        identity = get_jwt_identity()
+        if isinstance(identity, str):
+            identity = json.loads(identity)
+            
         user_id = identity.get("id")
-        tipo_usuario = identity.get("tipo") # 'lector', 'autor' o 'editorial'
+        tipo_usuario = identity.get("tipo") 
 
-        # 2. Inicializamos el nuevo comentario de forma limpia
-        # 🌟 NUEVO: Le pasamos directamente el parent_id aquí
         nuevo_comentario = Comentario(
             texto=texto,
             parent_id=parent_id
         )
 
-        # 3. Asignamos quién es el creador según el token (Tu lógica perfecta)
         if tipo_usuario == "lector":
             nuevo_comentario.lector_id = user_id
         elif tipo_usuario == "autor":
@@ -2099,7 +2156,6 @@ def crear_comentario():
         elif tipo_usuario == "editorial":
             nuevo_comentario.editorial_id = user_id
 
-        # 4. Asignamos en qué muro/post se está comentando (Tu lógica perfecta)
         if tipo_post == "lector":
             nuevo_comentario.post_lector_id = post_id
         elif tipo_post == "autor":
@@ -2112,16 +2168,43 @@ def crear_comentario():
         db.session.add(nuevo_comentario)
         db.session.commit()
 
+        # --- NOTIFICACIÓN ---
+        nombre_comentador = "Alguien"
+        if tipo_usuario == "lector":
+            lector_comentador = Lector.query.get(user_id)
+            if lector_comentador:
+                nombre_comentador = lector_comentador.username
+        elif tipo_usuario == "autor":
+            autor_comentador = Autor.query.get(user_id)
+            if autor_comentador:
+                nombre_comentador = f"{autor_comentador.nombre} {autor_comentador.apellido}"
+        elif tipo_usuario == "editorial":
+            editorial_comentador = Editorial.query.get(user_id)
+            if editorial_comentador:
+                nombre_comentador = editorial_comentador.nombre
+
+        if tipo_post == "lector":
+            post = PostLector.query.get(post_id)
+            if post and post.lector_id != (user_id if tipo_usuario == "lector" else None):
+                notif = Notificacion(
+                    lector_id=post.lector_id,
+                    tipo="comentario",
+                    mensaje=f"{nombre_comentador} comentó en tu publicación.",
+                    url_destino=f"/perfil_lector/{post.lector_id}"
+                )
+                db.session.add(notif)
+                db.session.commit()
+
         return jsonify({"msg": "Comentario publicado!", "comentario": nuevo_comentario.serialize()}), 201
 
     except Exception as e:
         print("🔴 ERROR EN CREAR_COMENTARIO:", str(e))
         return jsonify({"msg": "Error interno al comentar", "error": str(e)}), 500
-    
+
+
 @api.route('/comentarios/<string:tipo_post>/<int:post_id>', methods=['GET'])
 def obtener_comentarios_post(tipo_post, post_id):
     try:
-        # Buscamos los comentarios según el tipo de muro
         if tipo_post == "lector":
             comentarios = Comentario.query.filter_by(post_lector_id=post_id).order_by(Comentario.id.asc()).all()
         elif tipo_post == "autor":
@@ -2136,7 +2219,8 @@ def obtener_comentarios_post(tipo_post, post_id):
     except Exception as e:
         print("🔴 ERROR EN OBTENER_COMENTARIOS_POST:", str(e))
         return jsonify({"msg": "Error al obtener comentarios", "error": str(e)}), 500
-    
+
+
 @api.route('/comentarios/<int:comentario_id>', methods=['PUT'])
 @jwt_required()
 def actualizar_comentario(comentario_id):
@@ -2147,9 +2231,10 @@ def actualizar_comentario(comentario_id):
         if not nuevo_texto:
             return jsonify({"msg": "El texto es obligatorio"}), 400
 
-        # Identificamos al usuario por el token
-        identity_raw = get_jwt_identity()
-        identity = json.loads(identity_raw)
+        identity = get_jwt_identity()
+        if isinstance(identity, str):
+            identity = json.loads(identity)
+            
         user_id = identity.get("id")
         tipo_usuario = identity.get("tipo")
 
@@ -2157,7 +2242,6 @@ def actualizar_comentario(comentario_id):
         if not comentario:
             return jsonify({"msg": "Comentario no encontrado"}), 404
 
-        # CONTROL DE SEGURIDAD: Validar que el que edita sea el dueño real
         es_dueno = False
         if tipo_usuario == "lector" and comentario.lector_id == user_id:
             es_dueno = True
@@ -2177,13 +2261,16 @@ def actualizar_comentario(comentario_id):
     except Exception as e:
         print("🔴 ERROR EN ACTUALIZAR_COMENTARIO:", str(e))
         return jsonify({"msg": "Error al editar comentario", "error": str(e)}), 500
-    
+
+
 @api.route('/comentarios/<int:comentario_id>', methods=['DELETE'])
 @jwt_required()
 def eliminar_comentario(comentario_id):
     try:
-        identity_raw = get_jwt_identity()
-        identity = json.loads(identity_raw)
+        identity = get_jwt_identity()
+        if isinstance(identity, str):
+            identity = json.loads(identity)
+            
         user_id = identity.get("id")
         tipo_usuario = identity.get("tipo")
 
@@ -2191,7 +2278,6 @@ def eliminar_comentario(comentario_id):
         if not comentario:
             return jsonify({"msg": "Comentario no encontrado"}), 404
 
-        # CONTROL DE SEGURIDAD: Validar que el que borra sea el dueño real
         es_dueno = False
         if tipo_usuario == "lector" and comentario.lector_id == user_id:
             es_dueno = True
@@ -2211,3 +2297,137 @@ def eliminar_comentario(comentario_id):
     except Exception as e:
         print("🔴 ERROR EN ELIMINAR_COMENTARIO:", str(e))
         return jsonify({"msg": "Error al eliminar comentario", "error": str(e)}), 500
+
+
+# =======================================================
+# --- NOTIFICACIONES ---
+# =======================================================
+
+@api.route('/notificaciones/<int:lector_id>', methods=['GET'])
+def get_notificaciones(lector_id):
+    notifs = Notificacion.query.filter_by(lector_id=lector_id).order_by(Notificacion.fecha.desc()).limit(50).all()
+    return jsonify([n.serialize() for n in notifs]), 200
+
+
+@api.route('/notificaciones/<int:notif_id>/leer', methods=['PUT'])
+def marcar_notificacion_leida(notif_id):
+    notif = Notificacion.query.get_or_404(notif_id)
+    notif.leida = True
+    db.session.commit()
+    return jsonify(notif.serialize()), 200
+
+
+@api.route('/notificaciones/<int:lector_id>/leer_todas', methods=['PUT'])
+def marcar_todas_leidas(lector_id):
+    Notificacion.query.filter_by(lector_id=lector_id, leida=False).update({"leida": True})
+    db.session.commit()
+    return jsonify({"msg": "Todas marcadas como leídas"}), 200
+
+
+# =======================================================
+# --- SUGERENCIAS DE LECTORES (por géneros similares) ---
+# =======================================================
+
+@api.route('/sugerencias_lectores/<int:lector_id>', methods=['GET'])
+def get_sugerencias_lectores(lector_id):
+    lector = Lector.query.get_or_404(lector_id)
+    ya_siguiendo = {s.seguido_id for s in lector.siguiendo}
+    ya_siguiendo.add(lector_id)
+
+    mis_generos = set()
+    for fav in lector.libros_fav:
+        if fav.libro and fav.libro.genero:
+            mis_generos.add(fav.libro.genero.lower())
+
+    if lector.generos_favoritos:
+        for g in lector.generos_favoritos.split(","):
+            mis_generos.add(g.strip().lower())
+
+    if not mis_generos:
+        sugerencias = Lector.query.filter(~Lector.id.in_(list(ya_siguiendo))).limit(6).all()
+        return jsonify([s.serialize() for s in sugerencias]), 200
+
+    candidatos = Lector.query.filter(~Lector.id.in_(list(ya_siguiendo))).all()
+
+    puntuados = []
+    for candidato in candidatos:
+        sus_generos = set()
+        for fav in candidato.libros_fav:
+            if fav.libro and fav.libro.genero:
+                sus_generos.add(fav.libro.genero.lower())
+        if candidato.generos_favoritos:
+            for g in candidato.generos_favoritos.split(","):
+                sus_generos.add(g.strip().lower())
+
+        score = len(mis_generos & sus_generos)
+        if score > 0:
+            puntuados.append((score, candidato))
+
+    puntuados.sort(key=lambda x: x[0], reverse=True)
+    sugeridos = [c for _, c in puntuados[:6]]
+
+    if len(sugeridos) < 6:
+        ids_sugeridos = {c.id for c in sugeridos} | ya_siguiendo
+        extras = Lector.query.filter(~Lector.id.in_(list(ids_sugeridos))).limit(6 - len(sugeridos)).all()
+        sugeridos += extras
+
+    return jsonify([s.serialize() for s in sugeridos]), 200
+
+
+# =======================================================
+# --- EDITORIALES FAVORITAS ---
+# =======================================================
+
+@api.route('/lector_editoriales_favoritas/<int:lector_id>', methods=['GET'])
+def get_editoriales_favoritas(lector_id):
+    favs = Lector_Editoriales_Favoritas.query.filter_by(lector_id=lector_id).all()
+    return jsonify([f.serialize() for f in favs]), 200
+
+
+@api.route('/lector_editoriales_favoritas', methods=['POST'])
+def add_editorial_favorita():
+    body = request.get_json()
+    existe = Lector_Editoriales_Favoritas.query.filter_by(
+        lector_id=body["lector_id"], editorial_id=body["editorial_id"]).first()
+    if existe:
+        return jsonify({"msg": "Ya está en favoritas"}), 400
+    nuevo = Lector_Editoriales_Favoritas(lector_id=body["lector_id"], editorial_id=body["editorial_id"])
+    db.session.add(nuevo)
+    db.session.commit()
+    return jsonify(nuevo.serialize()), 201
+
+
+@api.route('/lector_editoriales_favoritas/<int:fav_id>', methods=['DELETE'])
+def delete_editorial_favorita(fav_id):
+    fav = Lector_Editoriales_Favoritas.query.get_or_404(fav_id)
+    db.session.delete(fav)
+    db.session.commit()
+    return jsonify({"msg": "Eliminado"}), 200
+
+
+# Crear notificación cuando alguien te sigue
+@api.route('/follow_con_notif', methods=['POST'])
+def follow_con_notif():
+    body = request.get_json()
+    seguidor_id = body.get("seguidor_id")
+    seguido_id = body.get("seguido_id")
+
+    existe = Seguidor.query.filter_by(lector_id=seguidor_id, seguido_id=seguido_id).first()
+    if existe:
+        return jsonify({"msg": "Ya lo sigues"}), 400
+
+    nueva_relacion = Seguidor(lector_id=seguidor_id, seguido_id=seguido_id)
+    db.session.add(nueva_relacion)
+
+    seguidor = Lector.query.get(seguidor_id)
+    nombre = seguidor.username if seguidor else "Alguien"
+    notif = Notificacion(
+        lector_id=seguido_id,
+        tipo="follow",
+        mensaje=f"{nombre} comenzó a seguirte.",
+        url_destino=f"/perfil_lector/{seguidor_id}"
+    )
+    db.session.add(notif)
+    db.session.commit()
+
+    return jsonify(nueva_relacion.serialize()), 201
